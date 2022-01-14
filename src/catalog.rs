@@ -16,6 +16,12 @@ impl BackupCatalog {
         })
     }
     
+    pub fn empty() -> BackupCatalog {
+        BackupCatalog {
+            entries: vec![]
+        }
+    }
+    
     pub fn save_to(&self, file: std::fs::File) -> Result<(), std::io::Error>{
         use std::io::Write;
         let mut writer = std::io::BufWriter::new(file);
@@ -32,8 +38,13 @@ impl BackupCatalog {
         })
     }
     
-    pub fn most_recent(&self) -> &std::path::Path {
-        return &self.entries[0].path;
+    pub fn most_recent(&self) -> Option<&std::path::Path> {
+        if self.entries.len() > 0 {
+            Some(&self.entries[0].path)
+        }
+        else {
+            None
+        }
     }
 
     pub fn clean(&mut self, keep_limits: Vec<KeepLimit>) -> Result<(), std::io::Error> {
@@ -90,9 +101,12 @@ struct Entry {
 impl Entry {
     fn new(res: Result<std::string::String, std::io::Error>) -> Result<Entry, Error> {
         use regex::Regex;
+        lazy_static! {
+            static ref R: Regex = Regex::new(r"^(.+)\s+(\d+)$").unwrap();
+        }
         let string = res.map_err(|err| CatalogError::IoError(err))?;
-        let r = Regex::new(r"^(.+) \d+$").unwrap();
-        let caps = r.captures(string.as_str())
+        log::debug!("Entry line: {}", string);
+        let caps = R.captures(string.as_str())
             .ok_or(CatalogError::ParseError)?;
         Ok(Entry {
             path: std::path::Path::new(caps.get(1).ok_or(CatalogError::ParseError)?.as_str()).to_path_buf(),

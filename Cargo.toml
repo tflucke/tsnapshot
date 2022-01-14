@@ -3,6 +3,10 @@ name = "tsnapshot"
 version = "0.1.0"
 edition = "2018"
 
+[lib]
+name = "tsnapshot"
+doctest = true
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -10,10 +14,12 @@ bzip2 = "0.4.3"
 chrono = "0.4.19"
 flate2 = "1.0.22"
 json = "0.12.4"
+lazy_static = "1.4.0"
 log = "0.4.14"
 mime_guess = "2.0.3"
 regex = "1.5.4"
 static_assertions = "1.1.0"
 symlink = "0.1.0"
+tar = "0.4.38"
 users = "0.11.0"
 zip = "0.5.13"

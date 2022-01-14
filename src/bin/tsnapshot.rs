@@ -1,12 +1,3 @@
-// ----- Set up crate ----------------------------------------------------------
-
-#[macro_use]
-extern crate static_assertions;
-
-mod config;
-mod backup;
-mod catalog;
-
 // ----- Logging Data Structures -----------------------------------------------
 
 static MY_LOGGER: MyLogger = MyLogger;
@@ -39,7 +30,7 @@ impl log::Log for MyLogger {
 fn real_main(args: Vec<String>) -> i32 {
     let config = match std::fs::read_to_string(&args[1]) {
         Ok(file_contents) => {
-            match crate::config::Configuration::new(file_contents.as_str()) {
+            match tsnapshot::config::Configuration::new(file_contents.as_str()) {
                 Ok(res) => res,
                 Err(parse_err) => {
                     println!("{:?}", parse_err);
@@ -61,26 +52,32 @@ fn real_main(args: Vec<String>) -> i32 {
     };
     let catalog_file_name = config.destination_dir.join("catalog.txt");
     let mut catalog = {
-        let catalog_file = match std::fs::OpenOptions::new()
+        if let Some(catalog_file) = match std::fs::OpenOptions::new()
             .read(true)
-            .create(true)
             .open(&catalog_file_name) {
-                Ok(file) => file,
-                Err(err) => {
+                Ok(file)                                               => Some(file),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err)                                               => {
                     log::error!("Failed to open catalog file {:?} for reading: {:?}.",
                              catalog_file_name, err);
                     return 1
                 }
-            };
-        match crate::catalog::BackupCatalog::new(catalog_file) {
-            Ok(file) => file,
-            Err(err) => {
-                log::error!("Failed to parse catalog file {:?}: {:?}.", catalog_file_name, err);
-                return 1
+            }
+        {
+            match tsnapshot::catalog::BackupCatalog::new(catalog_file) {
+                Ok(catalog) => catalog,
+                Err(err) => {
+                    log::error!("Failed to parse catalog file {:?}: {:?}.", catalog_file_name, err);
+                    return 1
+                }
             }
         }
+        else {
+            tsnapshot::catalog::BackupCatalog::empty()
+        }
     };
-    match config.backup(catalog.most_recent()) {
+    let most_recent = catalog.most_recent();
+    match config.backup(most_recent) {
         Ok(new_dir)   => catalog.push(&new_dir),
         Err(err)      => {
             log::error!("Failed to backup due to error: {:?}.", err);

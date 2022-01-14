@@ -197,7 +197,7 @@ impl Header {
             byte_copy(uid.name().to_str()
                       .ok_or(Error::new(ErrorKind::InvalidInput, "Username not representable as str."))?
                       .as_bytes(), &mut res.owner);
-            let gid = users::get_user_by_uid(meta.gid())
+            let gid = users::get_group_by_gid(meta.gid())
                 .ok_or(Error::new(ErrorKind::Other, "Cannot get GID"))?;
             byte_copy(gid.name().to_str()
                       .ok_or(Error::new(ErrorKind::InvalidInput, "Groupname not representable as str."))?

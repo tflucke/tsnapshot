@@ -7,6 +7,7 @@ use crate::backup::BackupOutputStream;
 use crate::backup::copy::CopyOutputStream;
 use crate::backup::tar::TarOutputStream;
 use crate::backup::hardlink::{HardLinkOutputStream,ChangeDetectionMethod};
+use crate::compression::*;
 
 // ----- Public Data Structures ------------------------------------------------
 
@@ -43,7 +44,7 @@ impl Configuration {
         }
     }
 
-    pub fn backup(&self, ref_path: &Path) -> Result<PathBuf, std::io::Error> {
+    pub fn backup(&self, ref_path: Option<&Path>) -> Result<PathBuf, std::io::Error> {
         let format = self.name_format.as_str();
         log::info!("output directory format: {:?}", format);
         let now = chrono::Local::now();
@@ -56,7 +57,7 @@ impl Configuration {
 }
 
 pub trait DirectoryConfig: std::fmt::Debug {
-    fn backup(&self, src: &Path, dst: &Path, out: &mut dyn BackupOutputStream, last: &Path)
+    fn backup(&self, src: &Path, dst: &Path, out: &mut dyn BackupOutputStream, last: Option<&Path>)
               -> Result<(), std::io::Error>;
     fn get_subpath(&self) -> &Path;
     fn get_subconfig(&self, path: &Path) -> Option<&dyn DirectoryConfig>;
@@ -216,7 +217,7 @@ impl BasicDirectory {
 }
 
 impl DirectoryConfig for BasicDirectory {
-    fn backup(&self, src: &Path, dst: &Path, out: &mut dyn BackupOutputStream, last: &Path)
+    fn backup(&self, src: &Path, dst: &Path, out: &mut dyn BackupOutputStream, last: Option<&Path>)
               -> Result<(), std::io::Error> {
         log::debug!("Reading metadata for {:?}...", src);
         let meta = src.symlink_metadata()?;
@@ -227,13 +228,19 @@ impl DirectoryConfig for BasicDirectory {
                 return Ok(())
             }
         }
-        log::debug!("Sending {:?} to backup stream...", src);
-        out.append_file(src)?;
-        if meta.file_type().is_dir() {
-            let new_config = self.get_subconfig(src).unwrap_or(self);
-            log::debug!("{:?} is directory.  Backing up subdirectories using config {:?}...", src, new_config.get_subpath());
-            for entry_res in fs::read_dir(src)? {
-                new_config.backup(&entry_res?.path(), dst, out, last)?;
+        if let Some(new_config) = self.get_subconfig(src) {
+            log::debug!("Backing up {:?} using new config {:?}...",
+                        src, new_config.get_subpath());
+            new_config.backup(src, dst, out, last)?;
+        }
+        else {
+            log::debug!("Sending {:?} to backup stream...", src);
+            out.append_file(src)?;
+            if meta.file_type().is_dir() {
+                log::debug!("{:?} is directory.  Backing up subdirectories...", src);
+                for entry_res in fs::read_dir(src)? {
+                    self.backup(&entry_res?.path(), dst, out, last)?;
+                }
             }
         }
         Ok(())
@@ -273,12 +280,12 @@ impl CompressedDirectory {
 }
 
 impl DirectoryConfig for CompressedDirectory {
-    fn backup(&self, src: &Path, dst: &Path, _out: &mut dyn BackupOutputStream, last: &Path)
+    fn backup(&self, src: &Path, dst: &Path, _out: &mut dyn BackupOutputStream, last: Option<&Path>)
               -> Result<(), std::io::Error> {
-        let out_file_name = dst.join(src).into_os_string().into_string()
+        let out_file_name = dst.join(src.parent().unwrap()).into_os_string().into_string()
             .map_err(|_os_str| std::io::Error::new(std::io::ErrorKind::InvalidInput,
                                                    "Filename not representable as str."))? +
-            self.algorithm.extension();
+            "/tsnapshot-" + src.file_name().unwrap().to_str().unwrap() + self.algorithm.extension();
         log::debug!("Compressing {:?} into compressed file {:?}", src, out_file_name);
         log::debug!("Creating output file {:?}...", out_file_name);
         let out_file = std::fs::File::create(out_file_name)?;
@@ -329,124 +336,23 @@ impl std::str::FromStr for ChangeDetectionMethod {
 }
 
 impl DirectoryConfig for HardLinkedDirectory {
-    fn backup(&self, src: &Path, dst: &Path, _out: &mut dyn BackupOutputStream, last: &Path)
+    fn backup(&self, src: &Path, dst: &Path, _out: &mut dyn BackupOutputStream, last_opt: Option<&Path>)
               -> Result<(), std::io::Error>  {
         log::debug!("Creating hard linked backup stream...");
-        let mut hard_link_out = HardLinkOutputStream::new(dst, last, self.max_link_count, &self.detection_method);
-        log::debug!("Continuing backup with hard linked stream...");
-        self.config.backup(src, dst, &mut hard_link_out, last)?;
-        return Ok(())
+        if let Some(last) = last_opt {
+            log::debug!("Continuing backup with hard linked stream...");
+            let mut hard_link_out = HardLinkOutputStream::new(dst, last, self.max_link_count, &self.detection_method);
+            self.config.backup(src, dst, &mut hard_link_out, last_opt)
+        }
+        else {
+            log::debug!("No reference directory.  Continuing backup with copy stream...");
+            let mut copy_out = CopyOutputStream::new(dst);
+            self.config.backup(src, dst, &mut copy_out, last_opt)
+        }
     }
     
     fn get_subpath(&self) -> &Path { return &self.config.get_subpath(); }
     fn get_subconfig(&self, path: &Path) -> Option<&dyn DirectoryConfig> { return self.config.get_subconfig(path); }
-}
-
-#[derive(Debug)]
-enum CompressionAlgorithm {
-    Bzip2(CompressionLevel),
-    Gzip(CompressionLevel),
-    Zip
-}
-
-impl CompressionAlgorithm {
-    fn extension(&self) -> &'static str {
-        match self {
-            CompressionAlgorithm::Bzip2(..) => ".tar.bz2",
-            CompressionAlgorithm::Gzip(..)  => ".tar.gz",
-            CompressionAlgorithm::Zip       => ".zip"
-        }
-    }
-    
-    fn get_writer(&self, out_writer: std::fs::File) -> Box<dyn Compressor> {
-        match self {
-            CompressionAlgorithm::Bzip2(level) => {
-                use bzip2::write::*;
-
-                struct Bzip2Compressor {
-                    encoder: BzEncoder<std::fs::File>
-                }
-                impl Compressor for Bzip2Compressor {
-                    fn writer(&mut self) -> &mut dyn std::io::Write {
-                        &mut self.encoder
-                    }
-                    fn close(&mut self) -> Result<(), std::io::Error> {
-                        self.encoder.try_finish()
-                    }
-                }
-                Box::new(Bzip2Compressor {
-                    encoder: BzEncoder::new(out_writer, match level {
-                        CompressionLevel::Best       => bzip2::Compression::best(),
-                        CompressionLevel::Fast       => bzip2::Compression::fast(),
-                        CompressionLevel::Level(lvl) => bzip2::Compression::new((*lvl).into())
-                    }),
-                })
-            },
-            CompressionAlgorithm::Gzip(level)  => {
-                use flate2::write::*;
-
-                struct GzipCompressor {
-                    encoder: GzEncoder<std::fs::File>
-                }
-                impl Compressor for GzipCompressor {
-                    fn writer(&mut self) -> &mut dyn std::io::Write {
-                        &mut self.encoder
-                    }
-                    fn close(&mut self) -> Result<(), std::io::Error> {
-                        self.encoder.try_finish()
-                    }
-                }
-                Box::new(GzipCompressor {
-                    encoder: GzEncoder::new(out_writer, match level {
-                        CompressionLevel::Best       => flate2::Compression::best(),
-                        CompressionLevel::Fast       => flate2::Compression::fast(),
-                        CompressionLevel::Level(lvl) => flate2::Compression::new((*lvl).into())
-                    }),
-                })
-            },
-            CompressionAlgorithm::Zip  => todo!(),
-        }
-    }
-}
-
-trait Compressor {
-    fn writer(&mut self) -> &mut dyn std::io::Write;
-    fn close(&mut self) -> Result<(), std::io::Error>;
-}
-
-impl std::str::FromStr for CompressionAlgorithm {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<CompressionAlgorithm, Error> {
-        match s.to_lowercase().as_str() {
-            "bzip2"   => Ok(CompressionAlgorithm::Bzip2(CompressionLevel::Fast)),
-            "gzip"    => Ok(CompressionAlgorithm::Gzip(CompressionLevel::Fast)),
-            "zip"     => Ok(CompressionAlgorithm::Zip),
-            algorithm => Err(ParseError::UnknownOption(algorithm.to_string())),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum CompressionLevel {
-    Fast,
-    Best,
-    Level(u8)
-}
-
-impl std::str::FromStr for CompressionLevel {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<CompressionLevel, Error> {
-        match s.to_lowercase().as_str() {
-            "best" => Ok(CompressionLevel::Best),
-            "fast" => Ok(CompressionLevel::Fast),
-            level_str if level_str.len() == 1 && level_str.chars().nth(0).unwrap().is_numeric() => {
-                Ok(CompressionLevel::Level(level_str.parse::<u8>().unwrap()))
-            },
-            level  => Err(ParseError::UnknownOption(level.to_string())),
-        }
-    }
 }
 
 #[derive(Debug)]
