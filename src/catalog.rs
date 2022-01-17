@@ -1,4 +1,4 @@
-use crate::config::KeepLimit;
+use crate::config::{ParseError, KeepLimit};
 
 // ----- Public Data Structures ------------------------------------------------
 
@@ -82,13 +82,7 @@ impl BackupCatalog {
     }
 }
 
-type Error = CatalogError;
-
-#[derive(Debug)]
-pub enum CatalogError {
-    ParseError,
-    IoError(std::io::Error)
-}
+type Error = ParseError;
 
 // ----- Entry Parsing Functions -----------------------------------------------
 
@@ -104,14 +98,14 @@ impl Entry {
         lazy_static! {
             static ref R: Regex = Regex::new(r"^(.+)\s+(\d+)$").unwrap();
         }
-        let string = res.map_err(|err| CatalogError::IoError(err))?;
+        let string = res.map_err(|err| ParseError::IoError(std::path::PathBuf::new(), err))?;
         log::debug!("Entry line: {}", string);
         let caps = R.captures(string.as_str())
-            .ok_or(CatalogError::ParseError)?;
+            .ok_or(ParseError::PatternError("Expected two columns in catalog", string.clone()))?;
         Ok(Entry {
-            path: std::path::Path::new(caps.get(1).ok_or(CatalogError::ParseError)?.as_str()).to_path_buf(),
-            timestamp: caps.get(2).ok_or(CatalogError::ParseError)?.as_str().parse()
-                .map_err(|_| CatalogError::ParseError)?,
+            path: std::path::Path::new(caps.get(1).unwrap().as_str()).to_path_buf(),
+            timestamp: caps.get(2).unwrap().as_str().parse()
+                .map_err(|_| ParseError::PatternError("No a valid epoch.", string.clone()))?,
         })
     }
 }

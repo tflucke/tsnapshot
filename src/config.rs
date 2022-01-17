@@ -26,18 +26,18 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    pub fn new(filename: &str) -> Result<Box<Configuration>, Error> {
+    pub fn new(filename: &str) -> Result<Configuration, Error> {
         match json::parse(filename) {
             Ok(json)      => match json {
-                json::JsonValue::Object(obj) => Ok(Box::new(Configuration {
+                json::JsonValue::Object(obj) => Ok(Configuration {
                     root_dir_config: <dyn DirectoryConfig>::new(
                         obj.get("root_dir_config").ok_or(ParseError::RequiredPropMissing("root_dir_config"))?
                     )?.0,
                     destination_dir: PathBuf::from(str_from_json_prop(&obj, "destination_dir")?),
-                    verbosity:       log_level_from_str(str_from_opt_json_prop(&obj, "verbosity", "warn")?)?,
+                    verbosity:       log_level_from_str(str_from_opt_json_prop(&obj, "verbosity", "warning")?)?,
                     name_format:     str_from_opt_json_prop(&obj, "name_format", "%Y-%m-%d_%H-%M-%S")?.to_string(),
                     keep_limit:      KeepLimit::new_vec(obj.get("keep limit"))?
-                })),
+                }),
                 _                            => Err(ParseError::NotAnObject(""))
             },
             Err(json_err) => Err(ParseError::JsonError(json_err))
@@ -82,6 +82,8 @@ pub enum ParseError {
     RequiredPropMissing(&'static str),
     BadRegex(std::string::String, regex::Error),
     CannotCompressNonbasic,
+    IoError(PathBuf, std::io::Error),
+    PatternError(&'static str, std::string::String),
 }
 
 // ----- Json Parsing Functions ------------------------------------------------
@@ -363,6 +365,7 @@ enum Filter {
     Not(Box<Filter>),
     And(Vec<Filter>),
     Or(Vec<Filter>)
+        // TODO: Creation/mod/access time
 }
 
 impl Filter {
@@ -432,6 +435,18 @@ fn log_level_from_str(s: &str) -> Result<log::LevelFilter, Error> {
         "warning" => Ok(log::LevelFilter::Warn),
         "error"   => Ok(log::LevelFilter::Error),
         lvl       => Err(ParseError::UnknownOption(lvl.to_string())),
+    }
+}
+
+pub fn log_level_from_u8(lvl: u8) -> log::LevelFilter {
+    if 0 == lvl {
+        log::LevelFilter::Warn
+    }
+    else if 1 == lvl {
+        log::LevelFilter::Info
+    }
+    else {
+        log::LevelFilter::Debug
     }
 }
 

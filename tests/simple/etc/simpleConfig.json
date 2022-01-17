@@ -1,0 +1,6 @@
+{
+    "root_dir_config": {
+        "subpath": "home"
+    },
+    "destination_dir": "/mnt/backup"
+}
